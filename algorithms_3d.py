@@ -6,6 +6,8 @@ from octomap import OctoMap
 
 ###############################################################################
 # 包含 BFS3D, AStar3D, PotentialField3D, RRT3D, RRTStar3D, CoarseToFinePlanner
+# 注意在 RRT/RRT* 里新增了 goal_bias，以提升成功率
+# 在 PotentialField3D 里增加了 jump_when_stuck 的简单处理
 ###############################################################################
 
 
@@ -203,6 +205,10 @@ class AStar3D:
 # ---------------- PotentialField3D ----------------
 class PotentialField3D:
     def __init__(self, env, start, goal, max_steps=2000, use_octomap=None):
+        """
+        这里为了示范, 我们增加一个 jump_when_stuck 选项(从 config["opt_settings"] 里获取),
+        若多次卡住则做一次随机跳, 尝试逃离局部极小值
+        """
         self.env= env
         self.start= start
         self.goal= goal
@@ -210,6 +216,12 @@ class PotentialField3D:
         self.octomap= use_octomap
         self.steps=0
         self.field= self.compute_field()
+
+        # 下面两个字段需要在 main.py 里, 通过 config 传进来(演示用, 这里直接写)
+        self.jump_when_stuck= False  
+
+    def set_jump_when_stuck(self, flag):
+        self.jump_when_stuck= flag
 
     def compute_field(self):
         W,H,D= self.env.width, self.env.height, self.env.depth
@@ -219,7 +231,7 @@ class PotentialField3D:
             for y in range(H):
                 for x in range(W):
                     dist= math.sqrt((x-gx)**2+(y-gy)**2+(z-gz)**2)
-                    field[z,y,x]= - dist
+                    field[z,y,x]= -dist
         # 障碍点设置很大势能
         for (ox,oy,oz) in self.env.obstacles:
             if 0<=ox<W and 0<=oy<H and 0<=oz<D:
@@ -236,25 +248,49 @@ class PotentialField3D:
         if self.is_blocked(*self.start) or self.is_blocked(*self.goal):
             return None
         path=[self.start]
-        cur= self.start
+        current= self.start
+        stuck_count=0
         for _ in range(self.max_steps):
             self.steps+=1
-            if cur== self.goal:
+            if current== self.goal:
                 return path
-            nxt= self.best_neighbor(cur)
-            if (not nxt) or (nxt== cur):
-                return None
+
+            nxt= self.best_neighbor(current)
+            if (not nxt) or (nxt== current):
+                stuck_count +=1
+                if self.jump_when_stuck and stuck_count>10:
+                    # 尝试随机跳
+                    tries=0
+                    while tries<50:
+                        rx= random.randint(0,self.env.width-1)
+                        ry= random.randint(0,self.env.height-1)
+                        rz= random.randint(0,self.env.depth-1)
+                        if not self.is_blocked(rx,ry,rz):
+                            nxt= (rx,ry,rz)
+                            stuck_count=0
+                            break
+                        tries+=1
+                    if not nxt or nxt== current:
+                        # 依旧跳不出去
+                        return None
+                else:
+                    return None
+            else:
+                stuck_count=0
+
             path.append(nxt)
-            cur= nxt
+            current= nxt
         return None
 
     def best_neighbor(self, pos):
         (x,y,z)= pos
         candidates= [(x,y,z)]
+        # 6邻域
         for (dx,dy,dz) in [(1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)]:
             nx,ny,nz= x+dx,y+dy,z+dz
             if self.in_bounds(nx,ny,nz) and not self.is_blocked(nx,ny,nz):
                 candidates.append((nx,ny,nz))
+
         def val(px,py,pz):
             return self.field[pz,py,px]
         best= min(candidates, key=lambda c: val(*c))
@@ -274,9 +310,14 @@ def distance_3d(n1,n2):
 
 class RRT3D:
     def __init__(self, env, start, goal,
-                 step_size=3, max_iter=1000, goal_threshold=4.0, use_octomap=None):
+                 step_size=3, max_iter=1000, goal_threshold=4.0,
+                 use_octomap=None, goal_bias=0.0):
         """
-        演示版 RRT, 并未接入 octomap
+        在3D空间使用RRT:
+         - step_size: 每次扩展步长
+         - max_iter:  最大迭代次数
+         - goal_threshold: 当新节点离目标距离小于此阈值就认为成功
+         - goal_bias: 直接采样goal的概率(0~1之间)
         """
         self.env= env
         self.start= Node3D(*start)
@@ -284,6 +325,7 @@ class RRT3D:
         self.step_size= step_size
         self.max_iter= max_iter
         self.goal_threshold= goal_threshold
+        self.goal_bias= goal_bias
         self.octomap= use_octomap
 
         self.node_list= [self.start]
@@ -301,9 +343,15 @@ class RRT3D:
 
         for _ in range(self.max_iter):
             self.steps+=1
-            rx= random.randint(0,self.env.width-1)
-            ry= random.randint(0,self.env.height-1)
-            rz= random.randint(0,self.env.depth-1)
+
+            # goal_bias 方式: 在一定概率下直接使用goal的坐标
+            if random.random()< self.goal_bias:
+                rx,ry,rz= self.goal.x, self.goal.y, self.goal.z
+            else:
+                rx= random.randint(0,self.env.width-1)
+                ry= random.randint(0,self.env.height-1)
+                rz= random.randint(0,self.env.depth-1)
+
             if self.is_blocked(rx,ry,rz):
                 continue
             rnd= Node3D(rx,ry,rz)
@@ -354,8 +402,9 @@ class RRT3D:
 class RRTStar3D(RRT3D):
     def __init__(self, env, start, goal,
                  step_size=3, max_iter=1000, goal_threshold=4.0,
-                 rewire_radius=3.0):
-        super().__init__(env, start, goal, step_size, max_iter, goal_threshold)
+                 rewire_radius=3.0, goal_bias=0.0):
+        super().__init__(env, start, goal, step_size, max_iter, goal_threshold,
+                         goal_bias=goal_bias)
         self.rewire_radius= rewire_radius
 
     def plan(self):
@@ -366,9 +415,15 @@ class RRTStar3D(RRT3D):
         cost_map= {self.start: 0.0}
         for _ in range(self.max_iter):
             self.steps+=1
-            rx= random.randint(0,self.env.width-1)
-            ry= random.randint(0,self.env.height-1)
-            rz= random.randint(0,self.env.depth-1)
+
+            # goal_bias
+            if random.random()< self.goal_bias:
+                rx,ry,rz= self.goal.x, self.goal.y, self.goal.z
+            else:
+                rx= random.randint(0,self.env.width-1)
+                ry= random.randint(0,self.env.height-1)
+                rz= random.randint(0,self.env.depth-1)
+
             if self.is_blocked(rx,ry,rz):
                 continue
             rnd= Node3D(rx,ry,rz)
@@ -466,6 +521,7 @@ class CoarseToFinePlanner:
                            coarse_layer=coarse_layer,
                            fine_layer=fine_layer)
         elif name=="rrt":
+            # 这里演示固定step_size等, 你可再加goal_bias等
             return RRT3D(self.env, start, goal,
                          step_size=3, max_iter=1000, goal_threshold=5.0)
         else:

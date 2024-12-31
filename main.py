@@ -10,7 +10,6 @@ from octomap import OctoMap
 from algorithms_3d import (BFS3D, AStar3D, PotentialField3D,
                            RRT3D, RRTStar3D, CoarseToFinePlanner)
 
-
 def run_one_experiment(env, algo_name, config, octomap=None):
     """
     在给定 env、algo_name 下执行一次规划。
@@ -32,27 +31,40 @@ def run_one_experiment(env, algo_name, config, octomap=None):
         planner= BFS3D(env, start, goal,
                        neighbor_mode=config["bfs_settings"]["neighbor_mode"],
                        use_octomap=octomap, coarse_layer=False, fine_layer=False)
+
     elif algo_name=="astar":
         planner= AStar3D(env, start, goal,
                          neighbor_mode=config["astar_settings"]["neighbor_mode"],
                          heuristic=config["astar_settings"]["heuristic"],
                          use_octomap=octomap, coarse_layer=False, fine_layer=False)
+
     elif algo_name=="opt":
+        # 势场法
         planner= PotentialField3D(env, start, goal,
                                   max_steps=config["opt_settings"]["max_steps"])
+        # 若有jump_when_stuck
+        if "jump_when_stuck" in config["opt_settings"]:
+            planner.set_jump_when_stuck(config["opt_settings"]["jump_when_stuck"])
+
     elif algo_name=="rrt":
         rrt_cfg= config["rrt_settings"]
         planner= RRT3D(env, start, goal,
-                       step_size=rrt_cfg["step_size"],
+                       step_size= rrt_cfg["step_size"],
                        max_iter= rrt_cfg["max_iter"],
-                       goal_threshold= rrt_cfg["goal_threshold"])
+                       goal_threshold= rrt_cfg["goal_threshold"],
+                       goal_bias= rrt_cfg.get("goal_bias", 0.0)
+                      )
+
     elif algo_name=="rrt_star":
         rrt_star_cfg= config["rrt_star_settings"]
         planner= RRTStar3D(env, start, goal,
-                           step_size=rrt_star_cfg["step_size"],
-                           max_iter= rrt_star_cfg["max_iter"],
+                           step_size= rrt_star_cfg["step_size"],
+                           max_iter=  rrt_star_cfg["max_iter"],
                            goal_threshold= rrt_star_cfg["goal_threshold"],
-                           rewire_radius= rrt_star_cfg["rewire_radius"])
+                           rewire_radius= rrt_star_cfg["rewire_radius"],
+                           goal_bias= rrt_star_cfg.get("goal_bias", 0.0)
+                          )
+
     elif algo_name=="coarse_to_fine":
         c2f= config["coarse_to_fine_settings"]
         planner= CoarseToFinePlanner(env, start, goal,
@@ -189,7 +201,7 @@ def main():
 
     # 所有环境跑完，做统计
     print("\n=== Final Statistics over all environments ===")
-    algo_list_sorted= list(perf.keys())  # BFS, A*, ...
+    algo_list_sorted= list(perf.keys())
     for algo in algo_list_sorted:
         data= perf[algo]
         success_count= sum(1 for d in data if d[0])
@@ -210,11 +222,11 @@ def main():
         print(f" - {algo}: successRate={sr*100:.1f}% "
               f"time={tmean:.3f}±{tstd:.3f}, steps={smean:.1f}±{sstd:.1f}")
 
-    # === 绘制统计结果的图像 ===
+    # 统计结果可视化 (柱状图)
     fig, axs= plt.subplots(3,1, figsize=(8,12))
-
     X= range(len(algo_list_sorted))
-    # 1) Success Rate
+
+    # A) 成功率
     sr_vals= []
     for algo in algo_list_sorted:
         data= perf[algo]
@@ -227,9 +239,9 @@ def main():
     axs[0].set_xticks(list(X))
     axs[0].set_xticklabels(algo_list_sorted)
 
-    # 2) Time
-    tmeans= []
-    tstds= []
+    # B) 平均时间
+    tmeans=[]
+    tstds=[]
     for algo in algo_list_sorted:
         data= perf[algo]
         t= [d[1] for d in data if d[0]]
@@ -240,16 +252,15 @@ def main():
             m=0; s=0
         tmeans.append(m)
         tstds.append(s)
-
     axs[1].bar(X, tmeans, yerr=tstds, color='blue', alpha=0.7, capsize=5)
     axs[1].set_title("Time (mean ± std, success only)")
     axs[1].set_ylabel("Seconds")
     axs[1].set_xticks(list(X))
     axs[1].set_xticklabels(algo_list_sorted)
 
-    # 3) Steps
-    smeans= []
-    sstds= []
+    # C) 平均步数
+    smeans=[]
+    sstds=[]
     for algo in algo_list_sorted:
         data= perf[algo]
         st= [d[2] for d in data if d[0]]
@@ -260,7 +271,6 @@ def main():
             m=0; s=0
         smeans.append(m)
         sstds.append(s)
-
     axs[2].bar(X, smeans, yerr=sstds, color='orange', alpha=0.7, capsize=5)
     axs[2].set_title("Steps (mean ± std, success only)")
     axs[2].set_ylabel("Steps")
@@ -269,7 +279,6 @@ def main():
 
     plt.tight_layout()
     plt.show()
-
 
 if __name__=="__main__":
     main()
