@@ -1,22 +1,22 @@
-# environment_3d.py
-
 import numpy as np
 
 class Environment3D:
     """
-    3D 体素栅格环境
-    - width, height, depth: 尺寸
-    - obstacles: set((x,y,z), ...) 障碍物
+    3D 网格环境:
+     - width, height, depth
+     - obstacles: set((x,y,z), ...)
     """
 
     def __init__(self, width=20, height=20, depth=20, obstacle_positions=None):
         self.width = width
-        self.height = height
+        self.height= height
         self.depth = depth
         self.obstacles = obstacle_positions if obstacle_positions else set()
 
     def in_bounds(self, x, y, z):
-        return 0 <= x < self.width and 0 <= y < self.height and 0 <= z < self.depth
+        return (0 <= x < self.width and
+                0 <= y < self.height and
+                0 <= z < self.depth)
 
     def is_blocked(self, x, y, z):
         if not self.in_bounds(x, y, z):
@@ -24,7 +24,7 @@ class Environment3D:
         return (x, y, z) in self.obstacles
 
     def random_free_position(self):
-        """在非障碍区域随机找一个体素坐标。"""
+        """在非障碍坐标中随机返回 (x,y,z)"""
         while True:
             rx = np.random.randint(0, self.width)
             ry = np.random.randint(0, self.height)

@@ -1,101 +1,87 @@
-# config_octomap.yaml
 ################################################################################
-#  3D 路径规划配置文件 (YAML)
+#  配置文件
 #
-#  1) 基础环境设置: 宽高深, 障碍物数量, 随机种子
-#  2) 是否使用OctoMap, 以及coarse/fine的分辨率
-#  3) 是否比较所有算法, 多少次实验, 以及可视化方式
-#  4) 单算法模式时, 选用哪种算法
-#  5) 各算法特有参数
+# 1) 环境基本参数:
+#    width, height, depth: 3D 网格大小
+#    obstacle_count: 障碍物数量
+#    random_seed: 若不为 null，则固定随机种子，方便复现
+#
+# 2) num_runs: 表示要生成多少个随机环境; 对每个环境都对比多算法
+#
+# 3) 起点终点:
+#    start_random, goal_random: 若为 true，则随机起/终点
+#    start_position, goal_position: 若不随机，则使用固定坐标
+#
+# 4) OctoMap 配置:
+#    use_octomap: 是否启用 OctoMap
+#    coarse_resolution: 粗层分辨率(如4)
+#    fine_resolution:   细层分辨率(如1)
+#
+# 5) compare_algorithms: 是否比较多算法; 若true, 一次性跑(bfs, astar, opt, rrt, rrt_star, coarse_to_fine)
+#    若false, 仅跑 config["algorithm"] 指定的算法
+#
+# 6) 可视化:
+#    visualization_mode: "voxel_scatter" 或 "voxel_plot"
+#    show_start_goal_in_vis: 是否在图里标出起点(绿三角)和终点(红叉)
+#
+# 7) 各算法的参数:
+#    - bfs_settings: neighbor_mode="6" or "26"
+#    - astar_settings: neighbor_mode="6"/"26", heuristic="euclidean"/...
+#    - opt_settings: PotentialField 的最大迭代 steps
+#    - rrt_settings: step_size, max_iter, goal_threshold
+#    - rrt_star_settings: 同上, 另加 rewire_radius
+#    - coarse_to_fine_settings: 
+#       coarse_planner: "bfs"/"astar"/"rrt"
+#       fine_planner:   "bfs"/"astar"/"rrt"
+#       neighbor_mode:  "6" or "26"  (供bfs/astar使用)
 ################################################################################
 
-# -----------------------
-#  基础环境
-# -----------------------
-width: 100                  # 3D 网格环境的宽度 (X 方向)
-height: 100                 # 3D 网格环境的高度 (Y 方向)
-depth: 100                  # 3D 网格环境的深度 (Z 方向)
+width: 100
+height: 100
+depth: 100
 
-obstacle_count: 50         # 随机生成多少个障碍体素
-random_seed: null            # 随机种子; 若设为 null 则不固定
+obstacle_count: 80
+random_seed: null
 
-start_random: true         # 是否随机选起点
-goal_random: true          # 是否随机选终点
-start_position: [0, 0, 0]  # 若上面设为 false, 用这里的坐标
-goal_position: [19, 19, 19]
+num_runs: 5
 
-# -----------------------
-#  OctoMap 配置
-# -----------------------
-use_octomap: false         # 若 true, 则将体素环境转为 OctoMap, 并在上面进行碰撞检测
-coarse_resolution: 4       # (仅示意) coarse层每个节点覆盖多少体素
-fine_resolution: 1         # fine层每个节点覆盖多少体素(通常=1表示体素级)
+start_random: true
+goal_random: true
+start_position: [0, 0, 0]
+goal_position: [29, 29, 29]
 
-# -----------------------
-#  实验/对比设置
-# -----------------------
-compare_algorithms: true  # 若 true, 则对 "bfs","astar","opt","rrt","rrt_star","coarse_to_fine" 都跑多次对比
-num_runs: 5                # 对每种算法跑几次
-sample_paths_for_visualization: 2  # 若对比多次, 随机抽几条成功的路径放3D图中显示
+use_octomap: true
+coarse_resolution: 4
+fine_resolution: 1
 
-# -----------------------
-#  可视化方式
-#  可选: "voxel_scatter" (散点), "voxel_plot" (matplotlib的 voxel 方法, 适合小规模)
-# -----------------------
-visualization_mode: "voxel_scatter"
-
-# -----------------------
-#  单算法模式
-# -----------------------
+compare_algorithms: true
 algorithm: "rrt_star"
 
-# -----------------------
-#  BFS 相关参数
-#  neighbor_mode: "6" or "26"
-# -----------------------
+visualization_mode: "voxel_scatter"
+show_start_goal_in_vis: true
+
 bfs_settings:
   neighbor_mode: "6"
 
-# -----------------------
-#  A* 相关参数
-#  neighbor_mode: 同上
-#  heuristic: "euclidean" or "manhattan"
-# -----------------------
 astar_settings:
   neighbor_mode: "6"
   heuristic: "euclidean"
 
-# -----------------------
-#  Potential Field
-#  max_steps: 避免死循环
-# -----------------------
 opt_settings:
   max_steps: 2000
 
-# -----------------------
-#  RRT
-#  step_size, max_iter, goal_threshold
-# -----------------------
 rrt_settings:
   step_size: 3
-  max_iter: 5000
-  goal_threshold: 5.0
+  max_iter: 1000
+  goal_threshold: 4.0
 
-# -----------------------
-#  RRT*
-#  主要和RRT参数类似, 这里简单加一个rewire_radius
-# -----------------------
 rrt_star_settings:
   step_size: 3
-  max_iter: 5000
-  goal_threshold: 5.0
+  max_iter: 1000
+  goal_threshold: 4.0
   rewire_radius: 3.0
 
-# -----------------------
-#  Coarse-to-Fine 示例
-#  这里我们演示先在coarse分辨率的 OctoMap 上大概搜BFS, 再在fine分辨率中细化局部路径
-#  (示例非常简化, 仅作概念展示)
-# -----------------------
 coarse_to_fine_settings:
-  neighbor_mode: "6"   # BFS时用多少邻域
-  refine_method: "astar"  # BFS成功后, 在 fine map 上的精确规划算法, 你也可写"bfs"/"astar"
+  coarse_planner: "bfs"
+  fine_planner: "astar"
+  neighbor_mode: "6"

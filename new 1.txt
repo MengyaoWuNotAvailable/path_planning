@@ -1,0 +1,991 @@
+# config_octomap.yaml
+################################################################################
+#  3D 路径规划配置文件 (YAML)
+#
+#  1) 基础环境设置: 宽高深, 障碍物数量, 随机种子
+#  2) 是否使用OctoMap, 以及coarse/fine的分辨率
+#  3) 是否比较所有算法, 多少次实验, 以及可视化方式
+#  4) 单算法模式时, 选用哪种算法
+#  5) 各算法特有参数
+################################################################################
+
+# -----------------------
+#  基础环境
+# -----------------------
+width: 100                  # 3D 网格环境的宽度 (X 方向)
+height: 100                 # 3D 网格环境的高度 (Y 方向)
+depth: 100                  # 3D 网格环境的深度 (Z 方向)
+
+obstacle_count: 50         # 随机生成多少个障碍体素
+random_seed: null            # 随机种子; 若设为 null 则不固定
+
+start_random: true         # 是否随机选起点
+goal_random: true          # 是否随机选终点
+start_position: [0, 0, 0]  # 若上面设为 false, 用这里的坐标
+goal_position: [19, 19, 19]
+
+# -----------------------
+#  OctoMap 配置
+# -----------------------
+use_octomap: false         # 若 true, 则将体素环境转为 OctoMap, 并在上面进行碰撞检测
+coarse_resolution: 4       # (仅示意) coarse层每个节点覆盖多少体素
+fine_resolution: 1         # fine层每个节点覆盖多少体素(通常=1表示体素级)
+
+# -----------------------
+#  实验/对比设置
+# -----------------------
+compare_algorithms: true  # 若 true, 则对 "bfs","astar","opt","rrt","rrt_star","coarse_to_fine" 都跑多次对比
+num_runs: 5                # 对每种算法跑几次
+sample_paths_for_visualization: 2  # 若对比多次, 随机抽几条成功的路径放3D图中显示
+
+# -----------------------
+#  可视化方式
+#  可选: "voxel_scatter" (散点), "voxel_plot" (matplotlib的 voxel 方法, 适合小规模)
+# -----------------------
+visualization_mode: "voxel_scatter"
+
+# -----------------------
+#  单算法模式
+# -----------------------
+algorithm: "rrt_star"
+
+# -----------------------
+#  BFS 相关参数
+#  neighbor_mode: "6" or "26"
+# -----------------------
+bfs_settings:
+  neighbor_mode: "6"
+
+# -----------------------
+#  A* 相关参数
+#  neighbor_mode: 同上
+#  heuristic: "euclidean" or "manhattan"
+# -----------------------
+astar_settings:
+  neighbor_mode: "6"
+  heuristic: "euclidean"
+
+# -----------------------
+#  Potential Field
+#  max_steps: 避免死循环
+# -----------------------
+opt_settings:
+  max_steps: 2000
+
+# -----------------------
+#  RRT
+#  step_size, max_iter, goal_threshold
+# -----------------------
+rrt_settings:
+  step_size: 3
+  max_iter: 5000
+  goal_threshold: 5.0
+
+# -----------------------
+#  RRT*
+#  主要和RRT参数类似, 这里简单加一个rewire_radius
+# -----------------------
+rrt_star_settings:
+  step_size: 3
+  max_iter: 5000
+  goal_threshold: 5.0
+  rewire_radius: 3.0
+
+# -----------------------
+#  Coarse-to-Fine 示例
+#  这里我们演示先在coarse分辨率的 OctoMap 上大概搜BFS, 再在fine分辨率中细化局部路径
+#  (示例非常简化, 仅作概念展示)
+# -----------------------
+coarse_to_fine_settings:
+  neighbor_mode: "6"   # BFS时用多少邻域
+  refine_method: "astar"  # BFS成功后, 在 fine map 上的精确规划算法, 你也可写"bfs"/"astar"
+
+
+''''above is config_octomap.yaml’‘’‘’‘’‘’
+
+# algorithms_3d.py
+
+import math, random, heapq
+import numpy as np
+from collections import deque
+from octomap import OctoMap
+
+################################################################################
+# BFS3D, AStar3D, PotentialField3D, RRT3D 与之前相同，为节省篇幅，不在此重复贴长代码
+# 此处我们只贴与RRT*、CoarseToFine相关的新类
+# 你可以把之前 BFS3D, AStar3D, PotentialField3D, RRT3D 的实现原封不动放在本文件开头
+################################################################################
+
+# ================== 先把原先 BFS3D ... RRT3D 同样放进来 =====================
+
+class BFS3D:
+    def __init__(self, env, start, goal, neighbor_mode="6", use_octomap=None, coarse_layer=False, fine_layer=False):
+        """
+        新增: use_octomap 为OctoMap对象或None
+             coarse_layer=True: 在octomap的coarse层检测 is_blocked_coarse
+             fine_layer=True:   在octomap的fine层检测 is_blocked_fine
+        """
+        self.env = env
+        self.start = start
+        self.goal = goal
+        self.neighbor_mode = neighbor_mode
+        self.octomap = use_octomap
+        self.coarse_layer = coarse_layer
+        self.fine_layer   = fine_layer
+
+        self.came_from = {}
+        self.steps = 0
+
+    def is_blocked(self, x, y, z):
+        """根据是否use_octomap, coarse_layer/fine_layer来选择检测函数"""
+        if self.octomap is None:
+            # 普通 environment
+            return self.env.is_blocked(x, y, z)
+        else:
+            if self.coarse_layer:
+                return (not self.octomap.coarse_in_bounds(x,y,z)) or self.octomap.is_blocked_coarse(x,y,z)
+            elif self.fine_layer:
+                return (not self.octomap.fine_in_bounds(x,y,z)) or self.octomap.is_blocked_fine(x,y,z)
+            else:
+                return self.env.is_blocked(x,y,z)
+
+    def in_bounds(self, x, y, z):
+        if self.octomap is None:
+            return self.env.in_bounds(x,y,z)
+        else:
+            if self.coarse_layer:
+                return self.octomap.coarse_in_bounds(x,y,z)
+            elif self.fine_layer:
+                return self.octomap.fine_in_bounds(x,y,z)
+            else:
+                return self.env.in_bounds(x,y,z)
+
+    def plan(self):
+        # BFS
+        if self.is_blocked(*self.start) or self.is_blocked(*self.goal):
+            return None
+
+        frontier = deque()
+        frontier.append(self.start)
+        self.came_from[self.start] = None
+
+        while frontier:
+            self.steps += 1
+            current = frontier.popleft()
+            if current == self.goal:
+                return self._reconstruct_path(current)
+
+            for nbr in self.get_neighbors(*current):
+                if nbr not in self.came_from:
+                    self.came_from[nbr] = current
+                    frontier.append(nbr)
+        return None
+
+    def get_neighbors(self, x, y, z):
+        if self.neighbor_mode == "6":
+            directions = [(1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)]
+        else:
+            directions = []
+            for dx in [-1,0,1]:
+                for dy in [-1,0,1]:
+                    for dz in [-1,0,1]:
+                        if dx==0 and dy==0 and dz==0:
+                            continue
+                        directions.append((dx,dy,dz))
+
+        for dx, dy, dz in directions:
+            nx, ny, nz = x+dx, y+dy, z+dz
+            if self.in_bounds(nx, ny, nz) and not self.is_blocked(nx, ny, nz):
+                yield (nx, ny, nz)
+
+    def _reconstruct_path(self, end_pos):
+        path = []
+        cur = end_pos
+        while cur is not None:
+            path.append(cur)
+            cur = self.came_from[cur]
+        path.reverse()
+        return path
+
+class AStar3D:
+    def __init__(self, env, start, goal, neighbor_mode="6", heuristic="euclidean",
+                 use_octomap=None, coarse_layer=False, fine_layer=False):
+        self.env = env
+        self.start = start
+        self.goal = goal
+        self.neighbor_mode = neighbor_mode
+        self.heuristic_type = heuristic
+        self.octomap = use_octomap
+        self.coarse_layer = coarse_layer
+        self.fine_layer   = fine_layer
+
+        self.came_from = {}
+        self.gscore = {}
+        self.fscore = {}
+        self.steps = 0
+
+    def is_blocked(self, x, y, z):
+        if self.octomap is None:
+            return self.env.is_blocked(x,y,z)
+        else:
+            if self.coarse_layer:
+                return (not self.octomap.coarse_in_bounds(x,y,z)) or self.octomap.is_blocked_coarse(x,y,z)
+            elif self.fine_layer:
+                return (not self.octomap.fine_in_bounds(x,y,z)) or self.octomap.is_blocked_fine(x,y,z)
+            else:
+                return self.env.is_blocked(x,y,z)
+
+    def in_bounds(self, x, y, z):
+        if self.octomap is None:
+            return self.env.in_bounds(x,y,z)
+        else:
+            if self.coarse_layer:
+                return self.octomap.coarse_in_bounds(x,y,z)
+            elif self.fine_layer:
+                return self.octomap.fine_in_bounds(x,y,z)
+            else:
+                return self.env.in_bounds(x,y,z)
+
+    def plan(self):
+        if self.is_blocked(*self.start) or self.is_blocked(*self.goal):
+            return None
+
+        self.gscore[self.start] = 0
+        self.fscore[self.start] = self.heuristic(self.start, self.goal)
+
+        open_list = []
+        heapq.heappush(open_list, (self.fscore[self.start], self.start))
+        self.came_from[self.start] = None
+
+        while open_list:
+            self.steps += 1
+            _, current = heapq.heappop(open_list)
+            if current == self.goal:
+                return self._reconstruct_path(current)
+
+            for nbr in self.get_neighbors(*current):
+                tentative_g = self.gscore[current] + 1
+                if (nbr not in self.gscore) or (tentative_g < self.gscore[nbr]):
+                    self.gscore[nbr] = tentative_g
+                    self.fscore[nbr] = tentative_g + self.heuristic(nbr, self.goal)
+                    self.came_from[nbr] = current
+                    heapq.heappush(open_list, (self.fscore[nbr], nbr))
+
+        return None
+
+    def get_neighbors(self, x, y, z):
+        if self.neighbor_mode == "6":
+            directions = [(1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)]
+        else:
+            directions = []
+            for dx in [-1,0,1]:
+                for dy in [-1,0,1]:
+                    for dz in [-1,0,1]:
+                        if dx==0 and dy==0 and dz==0:
+                            continue
+                        directions.append((dx,dy,dz))
+
+        for dx, dy, dz in directions:
+            nx, ny, nz = x+dx, y+dy, z+dz
+            if self.in_bounds(nx, ny, nz) and not self.is_blocked(nx, ny, nz):
+                yield (nx, ny, nz)
+
+    def heuristic(self, pos, goal):
+        x1,y1,z1 = pos
+        x2,y2,z2 = goal
+        if self.heuristic_type == "euclidean":
+            return math.sqrt((x1-x2)**2+(y1-y2)**2+(z1-z2)**2)
+        else:
+            return abs(x1-x2)+abs(y1-y2)+abs(z1-z2)
+
+    def _reconstruct_path(self, end_pos):
+        path = []
+        cur = end_pos
+        while cur is not None:
+            path.append(cur)
+            cur = self.came_from[cur]
+        path.reverse()
+        return path
+
+class PotentialField3D:
+    def __init__(self, env, start, goal, max_steps=2000, use_octomap=None):
+        self.env = env
+        self.start = start
+        self.goal = goal
+        self.max_steps = max_steps
+        self.octomap = use_octomap
+        # 这里为了简化, 不做 coarse/fine. 你也可仿照 BFS 加
+        self.steps = 0
+        self.field = self.compute_field()
+
+    def compute_field(self):
+        W,H,D = self.env.width, self.env.height, self.env.depth
+        field = np.zeros((D,H,W), dtype=float)
+        gx,gy,gz = self.goal
+        for z in range(D):
+            for y in range(H):
+                for x in range(W):
+                    dist = math.sqrt((x-gx)**2+(y-gy)**2+(z-gz)**2)
+                    field[z,y,x] = -dist
+        # 障碍设为很大
+        for (ox,oy,oz) in self.env.obstacles:
+            if 0<=ox<W and 0<=oy<H and 0<=oz<D:
+                field[oz,oy,ox] = 999999
+        return field
+
+    def is_blocked(self, x, y, z):
+        # 不演示octomap, 直接env
+        return self.env.is_blocked(x,y,z)
+
+    def in_bounds(self, x,y,z):
+        return self.env.in_bounds(x,y,z)
+
+    def plan(self):
+        if self.is_blocked(*self.start) or self.is_blocked(*self.goal):
+            return None
+        path = [self.start]
+        current = self.start
+        for _ in range(self.max_steps):
+            self.steps += 1
+            if current == self.goal:
+                return path
+            nxt = self.best_neighbor(current)
+            if not nxt or nxt==current:
+                return None
+            path.append(nxt)
+            current = nxt
+        return None
+
+    def best_neighbor(self, pos):
+        (x,y,z) = pos
+        candidates = [(x,y,z)]
+        for (dx,dy,dz) in [(1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)]:
+            nx,ny,nz = x+dx,y+dy,z+dz
+            if self.in_bounds(nx,ny,nz) and not self.is_blocked(nx,ny,nz):
+                candidates.append((nx,ny,nz))
+        def val(px,py,pz):
+            return self.field[pz,py,px]
+        best = min(candidates, key=lambda c: val(*c))
+        return best if best!=pos else None
+
+# ------------------- RRT3D -----------------------
+
+class Node3D:
+    def __init__(self, x,y,z, parent=None):
+        self.x = x
+        self.y = y
+        self.z = z
+        self.parent = parent
+
+def distance_3d(n1, n2):
+    return math.sqrt((n1.x-n2.x)**2+(n1.y-n2.y)**2+(n1.z-n2.z)**2)
+
+class RRT3D:
+    def __init__(self, env, start, goal, step_size=2, max_iter=1000, goal_threshold=2.0,
+                 use_octomap=None):
+        self.env = env
+        self.start = Node3D(*start)
+        self.goal  = Node3D(*goal)
+        self.step_size = step_size
+        self.max_iter  = max_iter
+        self.goal_threshold = goal_threshold
+        self.octomap = use_octomap
+
+        self.node_list = [self.start]
+        self.steps = 0
+
+    def is_blocked(self, x,y,z):
+        if not self.env.in_bounds(x,y,z):
+            return True
+        return self.env.is_blocked(x,y,z)
+
+    def plan(self):
+        if self.is_blocked(self.start.x,self.start.y,self.start.z) or \
+           self.is_blocked(self.goal.x,self.goal.y,self.goal.z):
+            return None
+
+        for _ in range(self.max_iter):
+            self.steps += 1
+            rx = random.randint(0,self.env.width-1)
+            ry = random.randint(0,self.env.height-1)
+            rz = random.randint(0,self.env.depth-1)
+            if self.is_blocked(rx,ry,rz):
+                continue
+            rnd_node = Node3D(rx,ry,rz)
+
+            nearest = self.get_nearest_node(rnd_node)
+            new_node = self.steer(nearest, rnd_node)
+            if not self.is_blocked(new_node.x,new_node.y,new_node.z):
+                new_node.parent = nearest
+                self.node_list.append(new_node)
+                if distance_3d(new_node,self.goal)<self.goal_threshold:
+                    return self.build_path(new_node)
+        return None
+
+    def get_nearest_node(self, node):
+        nearest = None
+        min_dist= float('inf')
+        for nd in self.node_list:
+            d = distance_3d(nd,node)
+            if d<min_dist:
+                min_dist=d
+                nearest=nd
+        return nearest
+
+    def steer(self, from_node, to_node):
+        dx = to_node.x - from_node.x
+        dy = to_node.y - from_node.y
+        dz = to_node.z - from_node.z
+        dist= math.sqrt(dx*dx+dy*dy+dz*dz)
+        if dist==0:
+            return Node3D(from_node.x, from_node.y, from_node.z, from_node)
+        scale= self.step_size/dist
+        nx= from_node.x + int(round(dx*scale))
+        ny= from_node.y + int(round(dy*scale))
+        nz= from_node.z + int(round(dz*scale))
+        return Node3D(nx,ny,nz)
+
+    def build_path(self, node):
+        path=[]
+        while node is not None:
+            path.append((node.x,node.y,node.z))
+            node=node.parent
+        path.reverse()
+        return path
+
+# ------------------- RRT*3D ----------------------
+
+class RRTStar3D(RRT3D):
+    """
+    简化版 RRT*, 在扩展成功后, 在某个半径内尝试 rewire
+    """
+    def __init__(self, env, start, goal, step_size=2, max_iter=1000, goal_threshold=2.0,
+                 rewire_radius=3.0):
+        super().__init__(env, start, goal, step_size, max_iter, goal_threshold)
+        self.rewire_radius = rewire_radius
+
+    def plan(self):
+        if self.is_blocked(self.start.x,self.start.y,self.start.z) or \
+           self.is_blocked(self.goal.x,self.goal.y,self.goal.z):
+            return None
+
+        cost_map = {self.start: 0.0}
+
+        for _ in range(self.max_iter):
+            self.steps += 1
+            rx = random.randint(0,self.env.width-1)
+            ry = random.randint(0,self.env.height-1)
+            rz = random.randint(0,self.env.depth-1)
+            if self.is_blocked(rx,ry,rz):
+                continue
+            rnd_node= Node3D(rx,ry,rz)
+
+            nearest= self.get_nearest_node(rnd_node)
+            new_node= self.steer(nearest, rnd_node)
+            if not self.is_blocked(new_node.x,new_node.y,new_node.z):
+                new_node.parent= nearest
+                cost_map[new_node]= cost_map[nearest]+distance_3d(new_node,nearest)
+                self.node_list.append(new_node)
+
+                # rewire
+                for nd in self.node_list:
+                    if nd==new_node or nd==nearest:
+                        continue
+                    if distance_3d(nd,new_node)<self.rewire_radius:
+                        new_cost= cost_map[new_node]+distance_3d(new_node,nd)
+                        if new_cost< cost_map.get(nd,1e9):
+                            # rewire
+                            nd.parent= new_node
+                            cost_map[nd]= new_cost
+
+                if distance_3d(new_node,self.goal)< self.goal_threshold:
+                    return self.build_path(new_node)
+        return None
+
+
+# ------------------- CoarseToFine -----------------
+class CoarseToFinePlanner:
+    """
+    简单示例:
+      1) 在coarse层(OctoMap)用 BFS 找到一条粗路径
+      2) 对粗路径每段, 在fine层再用A*精细化
+      3) 拼接生成完整路径
+    """
+    def __init__(self, env, start, goal, neighbor_mode="6", refine_method="astar", octomap=None):
+        self.env = env
+        self.start= start
+        self.goal = goal
+        self.neighbor_mode= neighbor_mode
+        self.refine_method= refine_method
+        self.octomap= octomap
+        self.steps= 0
+
+    def plan(self):
+        if not self.octomap:
+            return None
+
+        # 1) BFS 在coarse层
+        BFS_coarse = BFS3D(
+            env=self.env,
+            start=self.map_to_coarse(self.start),
+            goal=self.map_to_coarse(self.goal),
+            neighbor_mode=self.neighbor_mode,
+            use_octomap=self.octomap,
+            coarse_layer=True
+        )
+        coarse_path = BFS_coarse.plan()
+        self.steps += BFS_coarse.steps
+
+        if not coarse_path:
+            return None
+
+        # 2) 对coarse路径的每相邻节点, 在fine层做 refine
+        full_path = []
+        for idx in range(len(coarse_path)-1):
+            cA = coarse_path[idx]
+            cB = coarse_path[idx+1]
+
+            # cA -> cB 需要映射回 原始坐标
+            # 这里做法: 取各自在coarse栅格中心点(或 corner?), 再用 fine上的 A*
+            Apos = self.coarse_to_center(cA)
+            Bpos = self.coarse_to_center(cB)
+
+            sub_planner = None
+            if self.refine_method=="astar":
+                sub_planner = AStar3D(
+                    env=self.env,
+                    start=Apos, goal=Bpos,
+                    neighbor_mode=self.neighbor_mode,
+                    heuristic="euclidean",
+                    use_octomap=self.octomap,
+                    fine_layer=True
+                )
+            else:
+                # BFS fine
+                sub_planner = BFS3D(
+                    env=self.env,
+                    start=Apos, goal=Bpos,
+                    neighbor_mode=self.neighbor_mode,
+                    use_octomap=self.octomap,
+                    fine_layer=True
+                )
+
+            sub_path = sub_planner.plan()
+            self.steps += sub_planner.steps
+            if not sub_path:
+                return None
+            if idx>0:
+                sub_path = sub_path[1:]  # 避免重复拼接
+            full_path.extend(sub_path)
+
+        return full_path
+
+    def map_to_coarse(self, pos):
+        """将原始体素坐标pos -> coarse层坐标 (cx,cy,cz)"""
+        (x,y,z)= pos
+        cx= x//self.octomap.coarse_res
+        cy= y//self.octomap.coarse_res
+        cz= z//self.octomap.coarse_res
+        return (cx,cy,cz)
+
+    def coarse_to_center(self, coarse_pos):
+        """将coarse节点坐标 -> 原始坐标, 这里简单返回该块体素中心"""
+        (cx,cy,cz)= coarse_pos
+        base_x= cx*self.octomap.coarse_res
+        base_y= cy*self.octomap.coarse_res
+        base_z= cz*self.octomap.coarse_res
+        # center
+        half= self.octomap.coarse_res//2
+        rx= base_x+ half
+        ry= base_y+ half
+        rz= base_z+ half
+        # clip到边界
+        rx= min(rx,self.env.width-1)
+        ry= min(ry,self.env.height-1)
+        rz= min(rz,self.env.depth-1)
+        return (rx,ry,rz)
+
+
+
+‘’‘above is algorithms_3d.py''''''
+
+# environment_3d.py
+
+import numpy as np
+
+class Environment3D:
+    """
+    3D 体素栅格环境
+    - width, height, depth: 尺寸
+    - obstacles: set((x,y,z), ...) 障碍物
+    """
+
+    def __init__(self, width=20, height=20, depth=20, obstacle_positions=None):
+        self.width = width
+        self.height = height
+        self.depth = depth
+        self.obstacles = obstacle_positions if obstacle_positions else set()
+
+    def in_bounds(self, x, y, z):
+        return 0 <= x < self.width and 0 <= y < self.height and 0 <= z < self.depth
+
+    def is_blocked(self, x, y, z):
+        if not self.in_bounds(x, y, z):
+            return True
+        return (x, y, z) in self.obstacles
+
+    def random_free_position(self):
+        """在非障碍区域随机找一个体素坐标。"""
+        while True:
+            rx = np.random.randint(0, self.width)
+            ry = np.random.randint(0, self.height)
+            rz = np.random.randint(0, self.depth)
+            if (rx, ry, rz) not in self.obstacles:
+                return (rx, ry, rz)
+
+''''above is environment_3d.py''''''
+
+
+
+'''''# main.py
+
+import yaml
+import numpy as np
+import random
+import statistics
+import time
+
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+
+from environment_3d import Environment3D
+from octomap import OctoMap
+from algorithms_3d import (BFS3D, AStar3D, PotentialField3D, RRT3D, RRTStar3D,
+                           CoarseToFinePlanner)
+
+def run_one_experiment(env, algo_name, config, octomap=None):
+    """
+    返回 (path, time, steps, success_bool)
+    """
+    # 1) 确定 start / goal
+    start = env.random_free_position() if config["start_random"] else tuple(config["start_position"])
+    goal  = env.random_free_position() if config["goal_random"]  else tuple(config["goal_position"])
+
+    # 2) 根据 algo_name 创建planner
+    if algo_name=="bfs":
+        planner = BFS3D(
+            env, start, goal,
+            neighbor_mode = config["bfs_settings"]["neighbor_mode"],
+            use_octomap = octomap,
+            coarse_layer=False,
+            fine_layer=False
+        )
+    elif algo_name=="astar":
+        planner = AStar3D(
+            env, start, goal,
+            neighbor_mode = config["astar_settings"]["neighbor_mode"],
+            heuristic = config["astar_settings"]["heuristic"],
+            use_octomap = octomap,
+            coarse_layer=False,
+            fine_layer=False
+        )
+    elif algo_name=="opt":
+        planner = PotentialField3D(
+            env, start, goal,
+            max_steps = config["opt_settings"]["max_steps"]
+        )
+    elif algo_name=="rrt":
+        rrt_cfg = config["rrt_settings"]
+        planner = RRT3D(
+            env, start, goal,
+            step_size = rrt_cfg["step_size"],
+            max_iter  = rrt_cfg["max_iter"],
+            goal_threshold= rrt_cfg["goal_threshold"]
+        )
+    elif algo_name=="rrt_star":
+        rrt_star_cfg= config["rrt_star_settings"]
+        planner = RRTStar3D(
+            env, start, goal,
+            step_size= rrt_star_cfg["step_size"],
+            max_iter=  rrt_star_cfg["max_iter"],
+            goal_threshold= rrt_star_cfg["goal_threshold"],
+            rewire_radius= rrt_star_cfg["rewire_radius"]
+        )
+    elif algo_name=="coarse_to_fine":
+        c2f_cfg= config["coarse_to_fine_settings"]
+        planner = CoarseToFinePlanner(
+            env, start, goal,
+            neighbor_mode= c2f_cfg["neighbor_mode"],
+            refine_method= c2f_cfg["refine_method"],
+            octomap= octomap
+        )
+    else:
+        return None, 0.0, 0, False
+
+    # 3) 执行
+    t0= time.time()
+    path= planner.plan()
+    t1= time.time()
+    steps= planner.steps
+    success= (path is not None)
+    return path, (t1 - t0), steps, success
+
+def visualize_paths_3d(env, all_paths, mode="voxel_scatter", title="Paths"):
+    """
+    mode可选:
+     - "voxel_scatter": 障碍物用散点
+     - "voxel_plot": Matplotlib voxels函数(适合尺寸较小)
+    all_paths: [(algo_name, path, time, steps), ...]
+    """
+    fig = plt.figure(figsize=(10,8))
+    ax = fig.add_subplot(111, projection='3d')
+    ax.set_title(title)
+
+    if mode=="voxel_scatter":
+        # 障碍物散点
+        obs = list(env.obstacles)
+        ox = [o[0] for o in obs]
+        oy = [o[1] for o in obs]
+        oz = [o[2] for o in obs]
+        ax.scatter(ox, oy, oz, c='black', marker='s', s=20, alpha=0.3, label='Obstacles')
+    else:
+        # voxel_plot
+        grid = np.zeros((env.depth, env.height, env.width), dtype=bool)
+        for (ox,oy,oz) in env.obstacles:
+            grid[oz, oy, ox] = True
+        # Matplotlib的voxel是 [Z,Y,X] 维度
+        colors = np.empty(grid.shape, dtype=object)
+        colors[grid] = 'black'
+        ax.voxels(grid, facecolors=colors, edgecolor='k')
+
+    # 随机分配几种颜色
+    import random
+    color_list = ["green","blue","red","purple","orange","cyan","lime","yellow"]
+    random.shuffle(color_list)
+
+    for i, (algo, path, tcost, steps) in enumerate(all_paths):
+        if not path:
+            continue
+        c = color_list[i % len(color_list)]
+        px= [p[0] for p in path]
+        py= [p[1] for p in path]
+        pz= [p[2] for p in path]
+        ax.plot(px, py, pz, color=c, linewidth=2, label=f"{algo} path")
+        # 在中点标注
+        mid = len(path)//2
+        ax.text(px[mid], py[mid], pz[mid], f"{algo}\n{tcost:.2f}s\n{steps}stp", color=c)
+
+    ax.set_xlim(0, env.width)
+    ax.set_ylim(0, env.height)
+    ax.set_zlim(0, env.depth)
+    ax.invert_zaxis()  # 可根据喜好
+    ax.legend()
+    plt.show()
+
+def main():
+    with open("config_octomap.yaml","r",encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+
+    width  = config["width"]
+    height = config["height"]
+    depth  = config["depth"]
+    obs_count = config["obstacle_count"]
+    rnd_seed  = config["random_seed"]
+
+    if rnd_seed is not None:
+        random.seed(rnd_seed)
+        np.random.seed(rnd_seed)
+
+    # 生成障碍
+    obstacles= set()
+    for _ in range(obs_count):
+        x= random.randint(0,width-1)
+        y= random.randint(0,height-1)
+        z= random.randint(0,depth-1)
+        obstacles.add((x,y,z))
+
+    env= Environment3D(width, height, depth, obstacles)
+
+    # 若 use_octomap
+    octomap_obj= None
+    if config["use_octomap"]:
+        octomap_obj= OctoMap(env,
+            coarse_resolution=config["coarse_resolution"],
+            fine_resolution=config["fine_resolution"]
+        )
+
+    compare= config["compare_algorithms"]
+    algo_list= ["bfs","astar","opt","rrt","rrt_star","coarse_to_fine"]
+    num_runs= config["num_runs"]
+    sampleN= config["sample_paths_for_visualization"]
+    vis_mode= config["visualization_mode"]
+
+    if compare:
+        # 多算法多次实验
+        results= {a: [] for a in algo_list}  # {algo: [(time, steps, success, path), ...], ...}
+        for algo in algo_list:
+            for run_id in range(num_runs):
+                path,tcost,steps,success= run_one_experiment(env, algo, config, octomap_obj)
+                results[algo].append((tcost,steps,success, path))
+
+        # 分析
+        performance= {}
+        for algo in algo_list:
+            data= results[algo]
+            times= [d[0] for d in data if d[2]]  # 成功样本时间
+            steps= [d[1] for d in data if d[2]]
+            success_count= sum(1 for d in data if d[2])
+            success_rate= success_count/len(data) if len(data)>0 else 0.0
+
+            if times:
+                tmean= statistics.mean(times)
+                tstd = statistics.pstdev(times) if len(times)>1 else 0
+            else:
+                tmean= 0
+                tstd= 0
+            if steps:
+                smean= statistics.mean(steps)
+                sstd= statistics.pstdev(steps) if len(steps)>1 else 0
+            else:
+                smean= 0
+                sstd= 0
+
+            performance[algo]= (success_rate, tmean,tstd, smean,sstd)
+
+        # 可视化 1: 性能对比
+        fig, axs= plt.subplots(3,1, figsize=(8,12))
+
+        X= range(len(algo_list))
+        # A) success rate
+        sr= [performance[a][0] for a in algo_list]
+        axs[0].bar(X, sr, color='green', alpha=0.7)
+        axs[0].set_title("Success Rate")
+        axs[0].set_ylabel("Rate")
+        axs[0].set_xticks(X)
+        axs[0].set_xticklabels(algo_list)
+
+        # B) time
+        tmeans= [performance[a][1] for a in algo_list]
+        tstds=  [performance[a][2] for a in algo_list]
+        axs[1].bar(X, tmeans, yerr=tstds, color='blue', alpha=0.7, capsize=5)
+        axs[1].set_title("Time (mean ± std on success only)")
+        axs[1].set_ylabel("Time (s)")
+        axs[1].set_xticks(X)
+        axs[1].set_xticklabels(algo_list)
+
+        # C) steps
+        smeans= [performance[a][3] for a in algo_list]
+        sstds=  [performance[a][4] for a in algo_list]
+        axs[2].bar(X, smeans, yerr=sstds, color='orange', alpha=0.7, capsize=5)
+        axs[2].set_title("Steps (mean ± std on success only)")
+        axs[2].set_ylabel("Steps")
+        axs[2].set_xticks(X)
+        axs[2].set_xticklabels(algo_list)
+
+        plt.tight_layout()
+        plt.show()
+
+        # 可视化 2: 随机抽样路径
+        sample_paths= []
+        for algo in algo_list:
+            data= results[algo]
+            success_runs= [d for d in data if d[2] and d[3] is not None]
+            random.shuffle(success_runs)
+            for i in range(min(sampleN, len(success_runs))):
+                tcost,steps,succ,pp= success_runs[i]
+                sample_paths.append((algo, pp, tcost, steps))
+        if sample_paths:
+            visualize_paths_3d(env, sample_paths, mode=vis_mode, title="Sample Paths")
+        else:
+            print("[INFO] No successful paths to visualize in compare mode.")
+
+    else:
+        # 单算法模式
+        algo_name= config["algorithm"]
+        path,tcost,steps,success= run_one_experiment(env, algo_name, config, octomap_obj)
+        if success:
+            print(f"{algo_name} Success: time={tcost:.2f}s steps={steps} path_len={len(path)}")
+            visualize_paths_3d(env, [(algo_name, path, tcost, steps)], mode=vis_mode, title=algo_name)
+        else:
+            print(f"{algo_name} Failed to find a path.")
+            visualize_paths_3d(env, [], mode=vis_mode, title=f"{algo_name} (No Path)")
+
+if __name__=="__main__":
+    main()
+''''''' above is main.py'''''
+
+
+# octomap.py
+
+class OctoMap:
+    """
+    简易 OctoMap, 仅示例：
+      - coarse_resolution
+      - fine_resolution
+    对于 coarse层: 若子体素有任何障碍，则该节点视为阻塞
+    对于 fine层: 类似体素级精度
+    """
+
+    def __init__(self, env, coarse_resolution=4, fine_resolution=1):
+        self.env = env
+        self.coarse_res = coarse_resolution
+        self.fine_res = fine_resolution
+
+        # 记录coarse/fine各自网格的尺寸(节点数)
+        import math
+        self.coarse_width = (env.width  + coarse_resolution - 1)//coarse_resolution
+        self.coarse_height= (env.height + coarse_resolution - 1)//coarse_resolution
+        self.coarse_depth = (env.depth  + coarse_resolution - 1)//coarse_resolution
+
+        self.fine_width = (env.width  + fine_resolution -1)//fine_resolution
+        self.fine_height= (env.height + fine_resolution-1)//fine_resolution
+        self.fine_depth = (env.depth  + fine_resolution -1)//fine_resolution
+
+    def is_blocked_coarse(self, cx, cy, cz):
+        """
+        在 coarse网格坐标(cx,cy,cz), 对应到原始体素范围:
+         x in [cx*res, (cx+1)*res), ...
+        若任何子体素是障碍，则视为 blocked
+        """
+        base_x = cx * self.coarse_res
+        base_y = cy * self.coarse_res
+        base_z = cz * self.coarse_res
+        for dx in range(self.coarse_res):
+            for dy in range(self.coarse_res):
+                for dz in range(self.coarse_res):
+                    x = base_x + dx
+                    y = base_y + dy
+                    z = base_z + dz
+                    if not self.env.in_bounds(x, y, z):
+                        return True  # 越界就当阻塞(示例)
+                    if self.env.is_blocked(x, y, z):
+                        return True
+        return False
+
+    def is_blocked_fine(self, fx, fy, fz):
+        """
+        在 fine网格坐标对应到原始体素
+        """
+        base_x = fx * self.fine_res
+        base_y = fy * self.fine_res
+        base_z = fz * self.fine_res
+        for dx in range(self.fine_res):
+            for dy in range(self.fine_res):
+                for dz in range(self.fine_res):
+                    x = base_x + dx
+                    y = base_y + dy
+                    z = base_z + dz
+                    if not self.env.in_bounds(x, y, z):
+                        return True
+                    if self.env.is_blocked(x, y, z):
+                        return True
+        return False
+
+    def coarse_in_bounds(self, cx, cy, cz):
+        return 0 <= cx < self.coarse_width and 0 <= cy < self.coarse_height and 0 <= cz < self.coarse_depth
+
+    def fine_in_bounds(self, fx, fy, fz):
+        return 0 <= fx < self.fine_width and 0 <= fy < self.fine_height and 0 <= fz < self.fine_depth
+
+
+''''above is octomap.py'''''
