@@ -6,8 +6,7 @@ from octomap import OctoMap
 
 ###############################################################################
 # 包含 BFS3D, AStar3D, PotentialField3D, RRT3D, RRTStar3D, CoarseToFinePlanner
-# 注意在 RRT/RRT* 里新增了 goal_bias，以提升成功率
-# 在 PotentialField3D 里增加了 jump_when_stuck 的简单处理
+# 在 RRT/RRT* 中引入 goal_bias；PotentialField3D 引入 jump_when_stuck
 ###############################################################################
 
 
@@ -17,7 +16,7 @@ class BFS3D:
                  use_octomap=None, coarse_layer=False, fine_layer=False):
         self.env= env
         self.start= start
-        self.goal = goal
+        self.goal= goal
         self.neighbor_mode= neighbor_mode
         self.octomap= use_octomap
         self.coarse_layer= coarse_layer
@@ -205,10 +204,6 @@ class AStar3D:
 # ---------------- PotentialField3D ----------------
 class PotentialField3D:
     def __init__(self, env, start, goal, max_steps=2000, use_octomap=None):
-        """
-        这里为了示范, 我们增加一个 jump_when_stuck 选项(从 config["opt_settings"] 里获取),
-        若多次卡住则做一次随机跳, 尝试逃离局部极小值
-        """
         self.env= env
         self.start= start
         self.goal= goal
@@ -217,8 +212,7 @@ class PotentialField3D:
         self.steps=0
         self.field= self.compute_field()
 
-        # 下面两个字段需要在 main.py 里, 通过 config 传进来(演示用, 这里直接写)
-        self.jump_when_stuck= False  
+        self.jump_when_stuck= False  # 后面可由 config 设置
 
     def set_jump_when_stuck(self, flag):
         self.jump_when_stuck= flag
@@ -257,10 +251,11 @@ class PotentialField3D:
 
             nxt= self.best_neighbor(current)
             if (not nxt) or (nxt== current):
-                stuck_count +=1
+                stuck_count+=1
                 if self.jump_when_stuck and stuck_count>10:
-                    # 尝试随机跳
+                    # 试着随机跳
                     tries=0
+                    jumped=False
                     while tries<50:
                         rx= random.randint(0,self.env.width-1)
                         ry= random.randint(0,self.env.height-1)
@@ -268,10 +263,10 @@ class PotentialField3D:
                         if not self.is_blocked(rx,ry,rz):
                             nxt= (rx,ry,rz)
                             stuck_count=0
+                            jumped=True
                             break
                         tries+=1
-                    if not nxt or nxt== current:
-                        # 依旧跳不出去
+                    if not jumped:
                         return None
                 else:
                     return None
@@ -285,7 +280,6 @@ class PotentialField3D:
     def best_neighbor(self, pos):
         (x,y,z)= pos
         candidates= [(x,y,z)]
-        # 6邻域
         for (dx,dy,dz) in [(1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)]:
             nx,ny,nz= x+dx,y+dy,z+dz
             if self.in_bounds(nx,ny,nz) and not self.is_blocked(nx,ny,nz):
@@ -312,13 +306,6 @@ class RRT3D:
     def __init__(self, env, start, goal,
                  step_size=3, max_iter=1000, goal_threshold=4.0,
                  use_octomap=None, goal_bias=0.0):
-        """
-        在3D空间使用RRT:
-         - step_size: 每次扩展步长
-         - max_iter:  最大迭代次数
-         - goal_threshold: 当新节点离目标距离小于此阈值就认为成功
-         - goal_bias: 直接采样goal的概率(0~1之间)
-        """
         self.env= env
         self.start= Node3D(*start)
         self.goal=  Node3D(*goal)
@@ -344,7 +331,7 @@ class RRT3D:
         for _ in range(self.max_iter):
             self.steps+=1
 
-            # goal_bias 方式: 在一定概率下直接使用goal的坐标
+            # goal_bias
             if random.random()< self.goal_bias:
                 rx,ry,rz= self.goal.x, self.goal.y, self.goal.z
             else:
@@ -403,7 +390,8 @@ class RRTStar3D(RRT3D):
     def __init__(self, env, start, goal,
                  step_size=3, max_iter=1000, goal_threshold=4.0,
                  rewire_radius=3.0, goal_bias=0.0):
-        super().__init__(env, start, goal, step_size, max_iter, goal_threshold,
+        super().__init__(env, start, goal,
+                         step_size, max_iter, goal_threshold,
                          goal_bias=goal_bias)
         self.rewire_radius= rewire_radius
 
@@ -437,7 +425,7 @@ class RRTStar3D(RRT3D):
 
                 # rewire
                 for nd in self.node_list:
-                    if nd==new_node or nd==nearest: 
+                    if nd==new_node or nd==nearest:
                         continue
                     if distance_3d(nd,new_node)<= self.rewire_radius:
                         new_cost= cost_map[new_node]+ distance_3d(new_node, nd)
@@ -453,7 +441,7 @@ class RRTStar3D(RRT3D):
 # ---------------- CoarseToFinePlanner ----------------
 class CoarseToFinePlanner:
     """
-    简易演示:
+    简易示例:
       1) 在coarse层 用(bfs/astar/rrt)找到粗路径
       2) 对每个粗层节点之间的段, 用fine层(bfs/astar/rrt) refine
     """
@@ -521,7 +509,7 @@ class CoarseToFinePlanner:
                            coarse_layer=coarse_layer,
                            fine_layer=fine_layer)
         elif name=="rrt":
-            # 这里演示固定step_size等, 你可再加goal_bias等
+            # 这里演示固定step_size等, 你也可再加goal_bias等
             return RRT3D(self.env, start, goal,
                          step_size=3, max_iter=1000, goal_threshold=5.0)
         else:

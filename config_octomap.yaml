@@ -1,14 +1,16 @@
 ################################################################################
 #  配置文件 (示例)
 #
-# 1) 宽高深改为 100x100x100
-# 2) 障碍 80
-# 3) num_runs=5: 随机生成5个环境，每次环境都对比多算法
-# 4) use_octomap=true, coarse_resolution=4, fine_resolution=1
-# 5) compare_algorithms=true => 依次跑(bfs, astar, opt, rrt, rrt_star, coarse_to_fine)
-# 6) 在 rrt_settings/rrt_star_settings 里增大 step_size, max_iter, goal_threshold,
-#    并加入 goal_bias 用来做目标偏好采样(在 algorithms_3d.py 中会读取该配置)
-# 7) 在 opt_settings 中增加 jump_when_stuck=true, 让势场法可以随机跳出局部极小值
+# 1) 这里的 width, height, depth 均为 100，生成一个 100x100x100 的3D栅格
+# 2) obstacle_count = 80
+# 3) num_runs = 5，表示要随机生成5个环境；每个环境都对比多算法
+# 4) use_octomap = true， coarse_resolution=4, fine_resolution=1 (可在 BFS/A*中使用)
+#
+# 5) compare_algorithms = true => 依次跑 (bfs, astar, opt, rrt, rrt_star, coarse_to_fine)
+# 6) BFS/A* 的 neighbor_mode = "6"， A* 用欧几里得启发
+# 7) PotentialField (opt_settings) 加了 jump_when_stuck，若卡住则随机跳
+# 8) RRT/RRT* 调整了 step_size, max_iter, goal_threshold, 并加了 goal_bias
+# 9) coarse_to_fine_settings: 在coarse层跑bfs, 在fine层跑astar
 ################################################################################
 
 width: 100
@@ -44,7 +46,7 @@ astar_settings:
 
 opt_settings:
   max_steps: 3000
-  jump_when_stuck: true   # 自定义参数, 若陷入极小值则随机跳动
+  jump_when_stuck: true
 
 rrt_settings:
   step_size: 6

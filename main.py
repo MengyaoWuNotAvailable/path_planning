@@ -10,21 +10,31 @@ from octomap import OctoMap
 from algorithms_3d import (BFS3D, AStar3D, PotentialField3D,
                            RRT3D, RRTStar3D, CoarseToFinePlanner)
 
-def run_one_experiment(env, algo_name, config, octomap=None):
+
+def run_one_experiment(env, algo_name, config, octomap=None,
+                       start_override=None, goal_override=None):
     """
     在给定 env、algo_name 下执行一次规划。
-    返回: (path, time_cost, steps, success, start_pt, goal_pt)
+    可选: start_override, goal_override => 若不为None, 则使用这对坐标
+    返回: (path, time_cost, steps, success, used_start, used_goal)
     """
-    # 1) start/goal
-    if config["start_random"]:
-        start= env.random_free_position()
-    else:
-        start= tuple(config["start_position"])
 
-    if config["goal_random"]:
-        goal= env.random_free_position()
+    # 1) 先决定本次要用的 start, goal
+    if start_override is not None:
+        start = start_override
     else:
-        goal= tuple(config["goal_position"])
+        if config["start_random"]:
+            start = env.random_free_position()
+        else:
+            start = tuple(config["start_position"])
+
+    if goal_override is not None:
+        goal = goal_override
+    else:
+        if config["goal_random"]:
+            goal = env.random_free_position()
+        else:
+            goal = tuple(config["goal_position"])
 
     # 2) 创建算法
     if algo_name=="bfs":
@@ -42,7 +52,6 @@ def run_one_experiment(env, algo_name, config, octomap=None):
         # 势场法
         planner= PotentialField3D(env, start, goal,
                                   max_steps=config["opt_settings"]["max_steps"])
-        # 若有jump_when_stuck
         if "jump_when_stuck" in config["opt_settings"]:
             planner.set_jump_when_stuck(config["opt_settings"]["jump_when_stuck"])
 
@@ -81,6 +90,7 @@ def run_one_experiment(env, algo_name, config, octomap=None):
     t1= time.time()
     steps= planner.steps
     success= (path is not None)
+
     return path, (t1 - t0), steps, success, start, goal
 
 
@@ -104,7 +114,6 @@ def visualize_paths_3d(env, all_paths, mode="voxel_scatter",
         oz= [o[2] for o in obs]
         ax.scatter(ox, oy, oz, c='black', marker='s', s=15, alpha=0.3, label='Obstacles')
     else:
-        # voxel_plot
         grid= np.zeros((env.depth, env.height, env.width), dtype=bool)
         for (ox,oy,oz) in env.obstacles:
             grid[oz,oy,ox]= True
@@ -164,7 +173,7 @@ def main():
     perf= {a:[] for a in algo_list}
 
     for env_id in range(num_runs):
-        # 1) 生成随机环境
+        # --- 1) 生成随机障碍环境
         w= config["width"]
         h= config["height"]
         d= config["depth"]
@@ -177,29 +186,43 @@ def main():
             obstacles.add((rx,ry,rz))
         env= Environment3D(w,h,d, obstacles)
 
-        # 2) 若 use_octomap
+        # --- 2) 为该环境只随机一次 start / goal
+        if config["start_random"]:
+            start = env.random_free_position()
+        else:
+            start = tuple(config["start_position"])
+
+        if config["goal_random"]:
+            goal = env.random_free_position()
+        else:
+            goal = tuple(config["goal_position"])
+
+        # --- 3) 若 use_octomap
         octomap_obj= None
         if config["use_octomap"]:
             octomap_obj= OctoMap(env,
                                  coarse_resolution=config["coarse_resolution"],
                                  fine_resolution=config["fine_resolution"])
 
-        # 3) 在该环境中运行每个算法
+        # --- 4) 在该环境中用同一对 (start, goal) 运行每个算法
         run_results=[]
         for algo in algo_list:
-            path,tc,steps,success,st_pt,gl_pt= run_one_experiment(env, algo, config, octomap_obj)
-            run_results.append((algo, path, tc, steps, st_pt, gl_pt))
+            path,tc,steps,success,used_start,used_goal = \
+                run_one_experiment(env, algo, config, octomap_obj,
+                                   start_override=start,
+                                   goal_override=goal)
+            run_results.append((algo, path, tc, steps, used_start, used_goal))
 
             # 记录性能
             perf[algo].append((success, tc, steps))
 
-        # 4) 可视化本环境下所有算法的轨迹 (同一张图)
+        # --- 5) 可视化本环境下所有算法的轨迹 (同一张图)
         visualize_paths_3d(env, run_results,
                            mode=config["visualization_mode"],
                            title=f"Environment #{env_id+1}",
                            show_start_goal=config["show_start_goal_in_vis"])
 
-    # 所有环境跑完，做统计
+    # --- 所有环境跑完，做统计
     print("\n=== Final Statistics over all environments ===")
     algo_list_sorted= list(perf.keys())
     for algo in algo_list_sorted:
