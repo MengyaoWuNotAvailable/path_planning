@@ -1,16 +1,30 @@
 ################################################################################
-#  配置文件 (示例)
+#  配置文件
 #
-# 1) 这里的 width, height, depth 均为 100，生成一个 100x100x100 的3D栅格
-# 2) obstacle_count = 80
-# 3) num_runs = 5，表示要随机生成5个环境；每个环境都对比多算法
-# 4) use_octomap = true， coarse_resolution=4, fine_resolution=1 (可在 BFS/A*中使用)
+# 1) width,height,depth => 3D 网格大小
+# 2) obstacle_count => 障碍物数量
+# 3) random_seed => 若非 null，则固定随机种子，保证可复现
+# 4) num_runs => 生成多少次随机环境；在每个环境里对比多算法
 #
-# 5) compare_algorithms = true => 依次跑 (bfs, astar, opt, rrt, rrt_star, coarse_to_fine)
-# 6) BFS/A* 的 neighbor_mode = "6"， A* 用欧几里得启发
-# 7) PotentialField (opt_settings) 加了 jump_when_stuck，若卡住则随机跳
-# 8) RRT/RRT* 调整了 step_size, max_iter, goal_threshold, 并加了 goal_bias
-# 9) coarse_to_fine_settings: 在coarse层跑bfs, 在fine层跑astar
+# 5) start_random, goal_random => 是否随机起点/终点
+# 6) use_octomap => 是否使用 OctoMap
+# 7) coarse_resolution, fine_resolution => 对 BFS/A* 的 coarse/fine 检测
+#
+# 8) compare_algorithms => 是否对比多算法
+#    如果true => "bfs","astar","opt","rrt","rrt_star","coarse_to_fine","greedy_line" 都跑
+#    如果false => 只跑 config["algorithm"] 指定的那个
+#
+# 9) visualization_mode => "voxel_scatter"/"voxel_plot"
+#    show_start_goal_in_vis => 是否在图里标出起点(绿三角)与终点(红叉)
+#
+# 10) 各算法参数:
+#     bfs_settings => neighbor_mode("6"/"26")
+#     astar_settings => neighbor_mode("6"/"26"), heuristic("euclidean"/"manhattan")...
+#     opt_settings => PotentialField3D(max_steps, jump_when_stuck等)
+#     rrt_settings => step_size, max_iter, goal_threshold, goal_bias
+#     rrt_star_settings => 同上, 另加 rewire_radius
+#     coarse_to_fine_settings => coarse_planner("bfs"/"astar"/"rrt"), fine_planner("bfs"/"astar"/"rrt")
+#     greedy_settings => max_steps (供GreedyLinePlanner3D用)
 ################################################################################
 
 width: 100
@@ -20,7 +34,7 @@ depth: 100
 obstacle_count: 80
 random_seed: null
 
-num_runs: 5
+num_runs: 3
 
 start_random: true
 goal_random: true
@@ -31,8 +45,8 @@ use_octomap: true
 coarse_resolution: 4
 fine_resolution: 1
 
-compare_algorithms: true
-algorithm: "rrt_star"
+compare_algorithms: false
+algorithm: "greedy_line"
 
 visualization_mode: "voxel_scatter"
 show_start_goal_in_vis: true
@@ -50,18 +64,21 @@ opt_settings:
 
 rrt_settings:
   step_size: 6
-  max_iter: 5000
-  goal_threshold: 8.0
+  max_iter: 3000
+  goal_threshold: 3
   goal_bias: 0.1
 
 rrt_star_settings:
   step_size: 6
-  max_iter: 5000
-  goal_threshold: 8.0
+  max_iter: 3000
+  goal_threshold: 3
   rewire_radius: 6.0
   goal_bias: 0.1
 
 coarse_to_fine_settings:
   coarse_planner: "bfs"
-  fine_planner:   "astar"
+  fine_planner: "astar"
   neighbor_mode: "6"
+
+greedy_settings:
+  max_steps: 2000

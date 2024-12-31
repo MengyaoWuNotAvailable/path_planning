@@ -535,3 +535,93 @@ class CoarseToFinePlanner:
         ry= min(ry,self.env.height-1)
         rz= min(rz,self.env.depth-1)
         return (rx,ry,rz)
+
+
+class GreedyLinePlanner3D:
+    """
+    非常简单的“直线趋近”算法：
+      1) 在每一步，先计算 (dx, dy, dz) = goal - current
+      2) 尝试朝 (sign(dx), sign(dy), sign(dz)) 迈一步
+      3) 若该步被障碍阻塞，则在邻域内(可用26邻域或6邻域)寻找一个能让距离变小且没障碍的点
+      4) 重复，直到到达目标或达不到
+    """
+
+    def __init__(self, env, start, goal, max_steps=2000):
+        self.env = env
+        self.start = start
+        self.goal = goal
+        self.max_steps = max_steps
+        self.steps = 0
+
+    def plan(self):
+        # 如果起点或终点在障碍
+        if self.env.is_blocked(*self.start) or self.env.is_blocked(*self.goal):
+            return None
+
+        path = [self.start]
+        current = self.start
+        for _ in range(self.max_steps):
+            self.steps += 1
+            if current == self.goal:
+                return path
+
+            next_pos = self.get_next_position(current)
+            if not next_pos or next_pos == current:
+                # 找不到更好的前进位置，直接失败
+                return None
+
+            path.append(next_pos)
+            current = next_pos
+
+        return None  # 超过 max_steps 还没到，就视为失败
+
+    def get_next_position(self, current):
+        """
+        根据 (dx, dy, dz) 的符号，先尝试往最直接的方向走。
+        如果被挡住，则尝试在邻居里找一个更靠近goal的点。
+        """
+        (cx, cy, cz) = current
+        (gx, gy, gz) = self.goal
+        dx = gx - cx
+        dy = gy - cy
+        dz = gz - cz
+
+        # step_x = sign(dx), step_y = sign(dy), step_z = sign(dz)
+        step_x = 0 if dx == 0 else (1 if dx>0 else -1)
+        step_y = 0 if dy == 0 else (1 if dy>0 else -1)
+        step_z = 0 if dz == 0 else (1 if dz>0 else -1)
+
+        primary_choice = (cx + step_x, cy + step_y, cz + step_z)
+
+        # 如果 primary_choice 不被障碍，则直接走
+        if not self.env.is_blocked(*primary_choice):
+            return primary_choice
+
+        # 否则，我们在邻域(可以用6邻域或26邻域)中找一个更靠近goal的点
+        # 这里演示用26邻域
+        neighbors = []
+        for ddx in [-1, 0, 1]:
+            for ddy in [-1, 0, 1]:
+                for ddz in [-1, 0, 1]:
+                    if ddx==0 and ddy==0 and ddz==0:
+                        continue
+                    nx, ny, nz = cx+ddx, cy+ddy, cz+ddz
+                    if self.env.in_bounds(nx, ny, nz) and not self.env.is_blocked(nx, ny, nz):
+                        neighbors.append((nx, ny, nz))
+
+        if not neighbors:
+            return None  # 周围全挡住了
+
+        # 在 neighbors 中选一个“让距离到goal变小”的点
+        best_nbr = None
+        best_dist= self.dist3d(cx,cy,cz, gx,gy,gz)
+        for (nx, ny, nz) in neighbors:
+            d = self.dist3d(nx, ny, nz, gx, gy, gz)
+            if d < best_dist:
+                best_dist = d
+                best_nbr = (nx, ny, nz)
+
+        return best_nbr if best_nbr else None
+
+    def dist3d(self, x1, y1, z1, x2, y2, z2):
+        return ((x1-x2)**2 + (y1-y2)**2 + (z1-z2)**2)**0.5
